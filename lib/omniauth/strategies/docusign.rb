@@ -1,68 +1,66 @@
-require 'omniauth-oauth2'
+# frozen_string_literal: true
+
+require "omniauth-oauth2"
 
 module OmniAuth
   module Strategies
     class DocuSign < OmniAuth::Strategies::OAuth2
-      SANDBOX_URL = 'https://account-d.docusign.com'.freeze
-      PRODUCTION_URL = 'https://account.docusign.com'.freeze
+      option :name, "docusign"
 
-      option :client_options, {
-        authorize_url: "/oauth/auth",
-        token_url:     "/oauth/token"
-      }
+      def client
+        options.client_options.authorize_url = "#{options.oauth_base_uri}/oauth/auth"
+        options.client_options.user_info_url = "#{options.oauth_base_uri}/oauth/userinfo"
+        options.client_options.token_url = "#{options.oauth_base_uri}/oauth/token"
+        unless options.allow_silent_authentication
+          options.authorize_params.prompt = options.prompt
+        end
 
-      uid { user_info['accounts'].first['account_id'] }
+        super
+      end
+
+      uid { raw_info["sub"] }
 
       info do
         {
-          'uid'      => user_info['accounts'].first['account_id'],
-          'name'     => user_info['name'],
-          'email'    => user_info['email'],
-          'base_uri' => user_info['accounts'].first['base_uri']
+          name: raw_info["name"],
+          email: raw_info["email"],
+          first_name: raw_info["given_name"],
+          last_name: raw_info["family_name"],
         }
       end
 
       extra do
-        { 'user_info' => user_info }
-      end
-
-      # Overrride client to merge in site based on sandbox option
-      def client
-        ::OAuth2::Client.new(
-          options.client_id,
-          options.client_secret,
-          deep_symbolize(options.client_options).merge(site: site)
-        )
-      end
-      
-      def callback_url
-        full_host + script_name + callback_path
+        {
+          sub: raw_info["sub"],
+          account_id: @account["account_id"],
+          account_name: @account["account_name"],
+          base_uri: "#{@account["base_uri"]}/restapi",
+        }
       end
 
       private
 
-      def site
-        options.sandbox ? SANDBOX_URL : PRODUCTION_URL
+      def raw_info
+        @raw_info = access_token.get(options.client_options.user_info_url.to_s).parsed || {}
+        fetch_account @raw_info["accounts"] unless @raw_info.nil?
+        @raw_info
       end
 
-      def user_info
-        return @user_info if @user_info
+      private
 
-        conn = Faraday.new(url: site) do |faraday|
-          faraday.request  :url_encoded
-          faraday.adapter  Faraday.default_adapter
+      def fetch_account(items)
+        if options.target_account_id
+          @account = items.select { |item| item[:account_id] == options.target_account_id }.first
+        else
+          @account = items.select { |item| item["is_default"] == true }.first
         end
 
-        response = conn.get do |req|
-          req.url '/oauth/userinfo'
-          req.headers['Content-Type'] = 'application/json'
-          req.headers['Authorization'] = "Bearer #{access_token.token}"
+        if @account.empty?
+          raise "Could not find account information for the user"
         end
-
-        @user_info = MultiJson.decode(response.body)
       end
     end
   end
 end
 
-OmniAuth.config.add_camelization 'docusign', 'DocuSign'
+OmniAuth.config.add_camelization "docusign", "DocuSign"
